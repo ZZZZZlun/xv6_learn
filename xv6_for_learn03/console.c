@@ -1,0 +1,145 @@
+//
+// onsole input and output, to the uart.
+// Reads are line at time.
+// Implement special input characters:
+//  newline -- end of line
+//  control-h -- backspace
+//  control-u -- kill line
+//  control-d --  end of file
+//  control-p -- print process list
+//
+
+#include <stdarg.h>
+
+#include "types.h"
+#include "param.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "memlayout.h"
+#include "riscv.h"
+#include "defs.h"
+#include "proc.h"
+#include "vadefs.h"
+
+#define BACKSPACE 0x100 // erase the last output character
+#define C(x)  ((x)-'@') // Control-x
+
+//
+// send one character to the uart, but don't use
+// interrupts or sleep(). safe to be called from
+// interrupts, e.g. by printf and to echo input
+// characters.
+//
+void
+consputc(int c)
+{
+    if(c == BACKSPACE){
+        // if the user typed backspace, overwrite with a space.
+        uartputc_sync('\b');
+        uartputc_sync(' ');
+        uartputc_sync('\b');
+    } else {
+        uartputc_sync(c);
+    }
+}
+
+struct {
+    struct spinlock lock;
+
+    // input circular buffer
+#define INPUT_BUF_SIZE 128
+    char buf[INPUT_BUF_SIZE];
+    uint r; //Read index
+    uint w; //Write index
+    uint e; //Edit index
+} cons;
+
+//
+// user write() system calls to the console go here.
+// uses sleep() and UART interrupts.
+//
+// int 
+// consolewrite(int user_src, uint64 src, int n)
+// {
+//     char buf[32]; // move batchs from user space to uart
+//     int i = 0;
+
+//     while(i < n){
+//         int nn = sizeof(buf);
+//         if(nn > n - i)
+//             nn = n - i;
+//         if(either_copyin(buf, user_src, src+i, nn) == -1)
+//             break;
+//         uartwrite(buf, nn);
+//         i += nn;
+//     }
+
+//     return i;
+// }
+
+//
+// user read()s from the console go here.
+// copy (up to) a whole input line to dst.
+// user_dst indicates whether dst is a user
+// or kernel address.
+//
+int 
+consoleread(int user_dst, uint64 dst, int n)
+{
+    uint target;
+    int c;
+    char cbuf;
+
+    target = n;
+    acquire(&cons.lock);
+    while(n > 0){
+        // wait untill interrupt handler has put some
+        // input into cons.buffer.
+        while(cons.r == cons.w){
+            if(killed(myproc())){
+                release(&cons.lock);
+                return -1;
+            }
+            // sleep(&cons.r, &cons.lock);
+        }
+        //环形队列
+        c = cons.buf[cons.r++ % INPUT_BUF_SIZE];
+
+        if(c == C('D')){  // end-of-file
+            if(n < target){
+                // Save ^D for next time, to make sure
+                // caller gets a 0-byte result.
+                cons.r--;
+            }
+            break;
+        }
+            // copy the input byte to the user-space buffer.
+        cbuf = c;
+        // if(either_copyout(user_dst, dst, &cbuf, 1) == -1)
+        //     break;
+
+        dst++;
+        --n;
+
+        if(c == '\n'){
+            // a whole line has arrived, return to
+            // the user-level read().
+            break;
+        }
+    }
+    release(&cons.lock);
+
+    return target - n;  //返回最终读取的字节数
+}
+
+void
+consoleinit(void)
+{
+    initlock(&cons.lock, "cons");
+
+    uartinit();
+
+    // connect read and write system calls
+    // to consoleread and consolewrite.
+    
+}
